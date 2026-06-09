@@ -13,6 +13,9 @@ Implemented:
 - Write the verified poll command `02 06 06` to `0000ffe3-0000-1000-8000-00805f9b34fb`.
 - Decode verified `30 06` telemetry packets into voltage, current, frequency,
   temperature, and raw packet hex.
+- If the expected `FFE0` service is not found, enumerate every visible GATT
+  service and characteristic into the app log so firmware variants and Windows
+  pairing problems can be diagnosed.
 
 Not implemented yet:
 
@@ -111,6 +114,21 @@ The workflow file is at:
 The app logs all recognized telemetry and shows the raw packet hex so future
 captures can be compared against the existing protocol notes.
 
+## Password / Pairing Notes
+
+There are two different password cases:
+
+- Windows Bluetooth pairing PIN/password: pair the charger from Windows
+  `Settings > Devices > Bluetooth & other devices` first, then run this app and
+  connect again.
+- Charger app password: this is an application-level BLE packet. It is not
+  implemented yet because the available Android captures did not include the
+  password-submit write. The client intentionally does not guess this packet.
+
+If connection fails, check `app-log.txt` next to `HWChargerWin32.exe`. It now
+lists the Windows pairing state plus every GATT service and characteristic that
+Windows can see.
+
 If the EXE has already been built, you can also double-click:
 
 ```bat
@@ -121,6 +139,7 @@ run-win32-x86.bat
 
 - `run-log.txt` next to the batch files.
 - `startup-log.txt` next to `HWChargerWin32.exe` if the process starts.
+- `app-log.txt` next to `HWChargerWin32.exe` with scan/connect/GATT details.
 - `crash-log.txt` next to `HWChargerWin32.exe` if the app catches a startup
   exception or crash.
 

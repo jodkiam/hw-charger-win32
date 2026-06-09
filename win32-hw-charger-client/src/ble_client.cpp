@@ -3,6 +3,7 @@
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Devices.Bluetooth.h>
+#include <winrt/Windows.Devices.Enumeration.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.Streams.h>
@@ -10,7 +11,10 @@
 #include <atomic>
 #include <chrono>
 #include <cwctype>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -71,6 +75,119 @@ void TryInitMtaForThread() {
 
 std::wstring ErrorMessage(const winrt::hresult_error& error) {
   return std::wstring(error.message().c_str());
+}
+
+std::wstring GuidToString(const winrt::guid& value) {
+  std::wostringstream out;
+  out << std::hex << std::setfill(L'0') << std::nouppercase
+      << std::setw(8) << value.Data1 << L"-"
+      << std::setw(4) << value.Data2 << L"-"
+      << std::setw(4) << value.Data3 << L"-"
+      << std::setw(2) << static_cast<int>(value.Data4[0])
+      << std::setw(2) << static_cast<int>(value.Data4[1]) << L"-"
+      << std::setw(2) << static_cast<int>(value.Data4[2])
+      << std::setw(2) << static_cast<int>(value.Data4[3])
+      << std::setw(2) << static_cast<int>(value.Data4[4])
+      << std::setw(2) << static_cast<int>(value.Data4[5])
+      << std::setw(2) << static_cast<int>(value.Data4[6])
+      << std::setw(2) << static_cast<int>(value.Data4[7]);
+  return out.str();
+}
+
+std::wstring GattStatusToString(GattCommunicationStatus status) {
+  switch (status) {
+    case GattCommunicationStatus::Success:
+      return L"Success";
+    case GattCommunicationStatus::Unreachable:
+      return L"Unreachable";
+    case GattCommunicationStatus::ProtocolError:
+      return L"ProtocolError";
+    default: {
+      std::wostringstream out;
+      out << L"Status(" << static_cast<int>(status) << L")";
+      return out.str();
+    }
+  }
+}
+
+bool HasProperty(GattCharacteristicProperties properties, GattCharacteristicProperties flag) {
+  const auto value = static_cast<uint32_t>(properties);
+  return (value & static_cast<uint32_t>(flag)) != 0;
+}
+
+std::wstring CharacteristicPropertiesToString(GattCharacteristicProperties properties) {
+  std::vector<std::wstring> names;
+  if (HasProperty(properties, GattCharacteristicProperties::Broadcast)) {
+    names.push_back(L"Broadcast");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::Read)) {
+    names.push_back(L"Read");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::WriteWithoutResponse)) {
+    names.push_back(L"WriteWithoutResponse");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::Write)) {
+    names.push_back(L"Write");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::Notify)) {
+    names.push_back(L"Notify");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::Indicate)) {
+    names.push_back(L"Indicate");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::AuthenticatedSignedWrites)) {
+    names.push_back(L"AuthenticatedSignedWrites");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::ExtendedProperties)) {
+    names.push_back(L"ExtendedProperties");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::ReliableWrites)) {
+    names.push_back(L"ReliableWrites");
+  }
+  if (HasProperty(properties, GattCharacteristicProperties::WritableAuxiliaries)) {
+    names.push_back(L"WritableAuxiliaries");
+  }
+  if (names.empty()) {
+    return L"None";
+  }
+
+  std::wstring text;
+  for (const auto& name : names) {
+    if (!text.empty()) {
+      text += L"|";
+    }
+    text += name;
+  }
+  return text;
+}
+
+bool IsWritableCharacteristic(const GattCharacteristic& characteristic) {
+  const auto properties = characteristic.CharacteristicProperties();
+  return HasProperty(properties, GattCharacteristicProperties::Write) ||
+         HasProperty(properties, GattCharacteristicProperties::WriteWithoutResponse);
+}
+
+bool IsNotifiableCharacteristic(const GattCharacteristic& characteristic) {
+  const auto properties = characteristic.CharacteristicProperties();
+  return HasProperty(properties, GattCharacteristicProperties::Notify) ||
+         HasProperty(properties, GattCharacteristicProperties::Indicate);
+}
+
+GattWriteOption PreferredWriteOption(const GattCharacteristic& characteristic) {
+  const auto properties = characteristic.CharacteristicProperties();
+  if (HasProperty(properties, GattCharacteristicProperties::Write)) {
+    return GattWriteOption::WriteWithResponse;
+  }
+  return GattWriteOption::WriteWithoutResponse;
+}
+
+GattClientCharacteristicConfigurationDescriptorValue PreferredNotifyMode(
+    const GattCharacteristic& characteristic) {
+  const auto properties = characteristic.CharacteristicProperties();
+  if (HasProperty(properties, GattCharacteristicProperties::Notify)) {
+    return GattClientCharacteristicConfigurationDescriptorValue::Notify;
+  }
+  return GattClientCharacteristicConfigurationDescriptorValue::Indicate;
 }
 
 }  // namespace
@@ -156,38 +273,39 @@ class BleClient::Impl {
         return false;
       }
 
-      const auto services_result =
-          device.GetGattServicesForUuidAsync(kServiceUuid, BluetoothCacheMode::Uncached).get();
-      if (services_result.Status() != GattCommunicationStatus::Success ||
-          services_result.Services().Size() == 0) {
-        ReportStatus(L"Connect failed: FFE0 service not found");
+      ReportPairingState(device);
+
+      auto selected = FindKnownGattProfile(device);
+      if (!selected.service || !selected.notify_characteristic || !selected.write_characteristic) {
+        ReportStatus(
+            L"Connect failed: FFE0/FFE2/FFE3 GATT profile not found. If Windows asks for a Bluetooth PIN, "
+            L"pair the charger in Windows Bluetooth settings first, then try again. The app password packet "
+            L"is still uncaptured, so it is not sent by this client yet.");
+        DisconnectUnlocked();
         return false;
       }
 
-      const auto service = services_result.Services().GetAt(0);
-
-      const auto notify_result =
-          service.GetCharacteristicsForUuidAsync(kNotifyCharacteristicUuid, BluetoothCacheMode::Uncached).get();
-      if (notify_result.Status() != GattCommunicationStatus::Success ||
-          notify_result.Characteristics().Size() == 0) {
-        ReportStatus(L"Connect failed: FFE2 notify characteristic not found");
+      if (!IsNotifiableCharacteristic(selected.notify_characteristic)) {
+        ReportStatus(
+            L"Connect failed: selected notify characteristic does not advertise Notify or Indicate");
+        DisconnectUnlocked();
         return false;
       }
 
-      const auto write_result =
-          service.GetCharacteristicsForUuidAsync(kWriteCharacteristicUuid, BluetoothCacheMode::Uncached).get();
-      if (write_result.Status() != GattCommunicationStatus::Success ||
-          write_result.Characteristics().Size() == 0) {
-        ReportStatus(L"Connect failed: FFE3 write characteristic not found");
+      if (!IsWritableCharacteristic(selected.write_characteristic)) {
+        ReportStatus(
+            L"Connect failed: selected write characteristic does not advertise Write or WriteWithoutResponse");
+        DisconnectUnlocked();
         return false;
       }
 
       {
         std::lock_guard<std::mutex> lock(connection_mutex_);
         device_ = device;
-        service_ = service;
-        notify_characteristic_ = notify_result.Characteristics().GetAt(0);
-        write_characteristic_ = write_result.Characteristics().GetAt(0);
+        service_ = selected.service;
+        notify_characteristic_ = selected.notify_characteristic;
+        write_characteristic_ = selected.write_characteristic;
+        write_option_ = PreferredWriteOption(write_characteristic_);
         value_changed_token_ =
             notify_characteristic_.ValueChanged([this](const GattCharacteristic& characteristic,
                                                        const GattValueChangedEventArgs& args) {
@@ -195,13 +313,14 @@ class BleClient::Impl {
             });
       }
 
+      const auto notify_mode = PreferredNotifyMode(notify_characteristic_);
       const auto cccd_status =
           notify_characteristic_
-              .WriteClientCharacteristicConfigurationDescriptorAsync(
-                  GattClientCharacteristicConfigurationDescriptorValue::Notify)
+              .WriteClientCharacteristicConfigurationDescriptorAsync(notify_mode)
               .get();
       if (cccd_status != GattCommunicationStatus::Success) {
-        ReportStatus(L"Connect failed: FFE2 notification subscription failed");
+        ReportStatus(L"Connect failed: notification subscription failed: " +
+                     GattStatusToString(cccd_status));
         DisconnectUnlocked();
         return false;
       }
@@ -271,9 +390,9 @@ class BleClient::Impl {
       DataWriter writer;
       writer.WriteBytes(winrt::array_view<const uint8_t>(command.data(), command.data() + command.size()));
       const auto status =
-          write_characteristic_.WriteValueAsync(writer.DetachBuffer(), GattWriteOption::WriteWithResponse).get();
+          write_characteristic_.WriteValueAsync(writer.DetachBuffer(), write_option_).get();
       if (status != GattCommunicationStatus::Success) {
-        ReportStatus(L"Poll write failed");
+        ReportStatus(L"Poll write failed: " + GattStatusToString(status));
         return false;
       }
       return true;
@@ -284,6 +403,130 @@ class BleClient::Impl {
   }
 
  private:
+  struct GattProfile {
+    GattDeviceService service{nullptr};
+    GattCharacteristic notify_characteristic{nullptr};
+    GattCharacteristic write_characteristic{nullptr};
+  };
+
+  void ReportPairingState(const BluetoothLEDevice& device) {
+    try {
+      const bool is_paired = device.DeviceInformation().Pairing().IsPaired();
+      ReportStatus(std::wstring(L"Windows pairing state: ") + (is_paired ? L"paired" : L"not paired"));
+    } catch (const winrt::hresult_error& error) {
+      ReportStatus(L"Could not read Windows pairing state: " + ErrorMessage(error));
+    }
+  }
+
+  GattCharacteristic FindCharacteristicByUuid(const GattDeviceService& service,
+                                              const winrt::guid& uuid) {
+    const auto result =
+        service.GetCharacteristicsForUuidAsync(uuid, BluetoothCacheMode::Uncached).get();
+    const auto characteristics = result.Characteristics();
+    const uint32_t count = characteristics ? characteristics.Size() : 0;
+    if (result.Status() != GattCommunicationStatus::Success ||
+        count == 0) {
+      return nullptr;
+    }
+    return characteristics.GetAt(0);
+  }
+
+  GattProfile FindProfileInService(const GattDeviceService& service) {
+    const auto notify = FindCharacteristicByUuid(service, kNotifyCharacteristicUuid);
+    const auto write = FindCharacteristicByUuid(service, kWriteCharacteristicUuid);
+    if (notify && write) {
+      ReportStatus(L"Using live mapping: notify FFE2, write FFE3");
+      return GattProfile{service, notify, write};
+    }
+
+    const auto reverse_notify = FindCharacteristicByUuid(service, kWriteCharacteristicUuid);
+    const auto reverse_write = FindCharacteristicByUuid(service, kNotifyCharacteristicUuid);
+    if (reverse_notify && reverse_write) {
+      ReportStatus(L"Using fallback mapping: notify FFE3, write FFE2");
+      return GattProfile{service, reverse_notify, reverse_write};
+    }
+
+    return {};
+  }
+
+  GattProfile FindKnownGattProfile(const BluetoothLEDevice& device) {
+    const auto ffe0_result =
+        device.GetGattServicesForUuidAsync(kServiceUuid, BluetoothCacheMode::Uncached).get();
+    const auto ffe0_services = ffe0_result.Services();
+    const uint32_t ffe0_count = ffe0_services ? ffe0_services.Size() : 0;
+    ReportStatus(L"FFE0 service query: " + GattStatusToString(ffe0_result.Status()) +
+                 L", count " + std::to_wstring(ffe0_count));
+
+    if (ffe0_result.Status() == GattCommunicationStatus::Success &&
+        ffe0_count > 0) {
+      const auto service = ffe0_services.GetAt(0);
+      ReportStatus(L"Found expected service " + GuidToString(service.Uuid()));
+      const auto profile = FindProfileInService(service);
+      if (profile.service) {
+        LogSelectedProfile(profile);
+        return profile;
+      }
+      ReportStatus(L"Expected service exists, but expected FFE2/FFE3 characteristics were not usable.");
+    }
+
+    const auto all_services = device.GetGattServicesAsync(BluetoothCacheMode::Uncached).get();
+    const auto services = all_services.Services();
+    const uint32_t service_count = services ? services.Size() : 0;
+    ReportStatus(L"All service query: " + GattStatusToString(all_services.Status()) +
+                 L", count " + std::to_wstring(service_count));
+
+    if (all_services.Status() != GattCommunicationStatus::Success) {
+      ReportStatus(
+          L"Could not enumerate all GATT services. If the device has a Bluetooth PIN/password prompt, pair it "
+          L"from Windows Settings > Bluetooth first.");
+      return {};
+    }
+
+    for (uint32_t i = 0; i < service_count; ++i) {
+      const auto service = services.GetAt(i);
+      DumpService(service, i);
+
+      const auto profile = FindProfileInService(service);
+      if (profile.service) {
+        ReportStatus(L"Found expected FFE2/FFE3 characteristics under service " +
+                     GuidToString(service.Uuid()));
+        LogSelectedProfile(profile);
+        return profile;
+      }
+    }
+
+    return {};
+  }
+
+  void DumpService(const GattDeviceService& service, uint32_t service_index) {
+    ReportStatus(L"Service[" + std::to_wstring(service_index) + L"] " + GuidToString(service.Uuid()));
+
+    const auto result = service.GetCharacteristicsAsync(BluetoothCacheMode::Uncached).get();
+    const auto characteristics = result.Characteristics();
+    const uint32_t characteristic_count = characteristics ? characteristics.Size() : 0;
+    if (result.Status() != GattCommunicationStatus::Success) {
+      ReportStatus(L"  characteristics: " + GattStatusToString(result.Status()));
+      return;
+    }
+
+    for (uint32_t i = 0; i < characteristic_count; ++i) {
+      const auto characteristic = characteristics.GetAt(i);
+      ReportStatus(L"  Char[" + std::to_wstring(i) + L"] " +
+                   GuidToString(characteristic.Uuid()) + L" props=" +
+                   CharacteristicPropertiesToString(characteristic.CharacteristicProperties()));
+    }
+  }
+
+  void LogSelectedProfile(const GattProfile& profile) {
+    ReportStatus(L"Selected service: " + GuidToString(profile.service.Uuid()));
+    ReportStatus(L"Selected notify: " + GuidToString(profile.notify_characteristic.Uuid()) +
+                 L" props=" + CharacteristicPropertiesToString(
+                     profile.notify_characteristic.CharacteristicProperties()));
+    ReportStatus(L"Selected write: " + GuidToString(profile.write_characteristic.Uuid()) +
+                 L" props=" + CharacteristicPropertiesToString(
+                     profile.write_characteristic.CharacteristicProperties()));
+  }
+
   void OnAdvertisementReceived(const BluetoothLEAdvertisementReceivedEventArgs& args) {
     const std::wstring name(args.Advertisement().LocalName().c_str());
     if (!NameMatchesKnownCharger(name)) {
@@ -380,6 +623,7 @@ class BleClient::Impl {
   GattDeviceService service_{nullptr};
   GattCharacteristic notify_characteristic_{nullptr};
   GattCharacteristic write_characteristic_{nullptr};
+  GattWriteOption write_option_{GattWriteOption::WriteWithResponse};
   winrt::event_token value_changed_token_{};
   std::atomic_bool connected_{false};
 

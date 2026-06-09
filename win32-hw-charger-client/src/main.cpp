@@ -465,6 +465,7 @@ class AppWindow {
     const int length = GetWindowTextLengthW(log_edit_);
     SendMessageW(log_edit_, EM_SETSEL, length, length);
     SendMessageW(log_edit_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+    AppendLogFile(L"app-log.txt", text);
   }
 
   void PostDeviceFound(const hwcharger::DiscoveredDevice& device) {
@@ -520,6 +521,7 @@ class AppWindow {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
   SetUnhandledExceptionFilter(UnhandledExceptionHandler);
   WriteLogFile(L"startup-log.txt", L"HWChargerWin32 starting.\r\n");
+  WriteLogFile(L"app-log.txt", L"HWChargerWin32 app log.\r\n");
 
   try {
     winrt::init_apartment(winrt::apartment_type::single_threaded);
