@@ -1,0 +1,56 @@
+name: Build HW Charger Win32 x86
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-win32:
+    name: Build Release Win32
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Release Win32
+        shell: pwsh
+        run: |
+          $clientDir = Join-Path $env:GITHUB_WORKSPACE 'win32-hw-charger-client'
+          if (-not (Test-Path $clientDir)) {
+            $clientDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'HW智能充电器') 'win32-hw-charger-client'
+          }
+          if (-not (Test-Path $clientDir)) {
+            throw "win32-hw-charger-client was not found under $env:GITHUB_WORKSPACE"
+          }
+          $solution = Join-Path $clientDir 'HWChargerWin32.sln'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) {
+            throw 'MSBuild was not found on the runner.'
+          }
+          & $msbuild $solution /m /p:Configuration=Release /p:Platform=Win32
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          $clientDir = Join-Path $env:GITHUB_WORKSPACE 'win32-hw-charger-client'
+          if (-not (Test-Path $clientDir)) {
+            $clientDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE 'HW智能充电器') 'win32-hw-charger-client'
+          }
+          if (-not (Test-Path $clientDir)) {
+            throw "win32-hw-charger-client was not found under $env:GITHUB_WORKSPACE"
+          }
+          $releaseDir = Join-Path $clientDir 'bin\Win32\Release'
+          $distDir = Join-Path $env:GITHUB_WORKSPACE 'dist\HWChargerWin32-x86'
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          Copy-Item (Join-Path $releaseDir 'HWChargerWin32.exe') $distDir
+          Copy-Item (Join-Path $clientDir 'run-win32-x86.bat') $distDir
+          Copy-Item (Join-Path $clientDir 'README.md') $distDir
+          Compress-Archive -Path (Join-Path $distDir '*') -DestinationPath (Join-Path $env:GITHUB_WORKSPACE 'HWChargerWin32-x86.zip') -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HWChargerWin32-x86
+          path: HWChargerWin32-x86.zip
+          if-no-files-found: error
