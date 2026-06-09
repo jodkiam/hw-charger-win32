@@ -529,9 +529,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     common_controls.dwSize = sizeof(common_controls);
     common_controls.dwICC = ICC_STANDARD_CLASSES;
     if (!InitCommonControlsEx(&common_controls)) {
+      const DWORD error = GetLastError();
       std::wostringstream out;
-      out << L"InitCommonControlsEx failed. GetLastError=" << GetLastError() << L"\r\n";
-      throw std::runtime_error(Utf8FromWide(out.str()));
+      out << L"InitCommonControlsEx returned FALSE. GetLastError=" << error << L"\r\n";
+      AppendLogFile(L"startup-log.txt", out.str());
+      if (error != ERROR_ALREADY_EXISTS) {
+        throw std::runtime_error(Utf8FromWide(out.str()));
+      }
     }
     AppendLogFile(L"startup-log.txt", L"Common controls initialized.\r\n");
 
