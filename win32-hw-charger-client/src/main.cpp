@@ -1,7 +1,7 @@
 #include "ble_client.h"
 
-#include <commctrl.h>
 #include <windows.h>
+#include <commctrl.h>
 #include <winrt/base.h>
 
 #include <atomic>
